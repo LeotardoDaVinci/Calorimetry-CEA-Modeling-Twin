@@ -1,0 +1,35 @@
+[
+  {
+    "label": "jp10",
+    "cea_name": "JP-10(L)",
+    "formula": "C 10 H 16",
+    "hoc_kj_g": 43.3
+  },
+  {
+    "label": "Jet-A",
+    "cea_name": "Jet-A(L)",
+    "formula": "C 12 H 23",
+    "hoc_kj_g": 44.0          
+  }, 
+  {
+    "label": "glucose",
+    "formula": "C 6 H 12 O 6",
+    "mw_g_mol": 180.156,
+    "dhf_kj_mol": -1271.0,
+    "hoc_kj_g": 15.57
+  },
+  {
+    "label": "sucrose",
+    "formula": "C 12 H 22 O 11",
+    "mw_g_mol": 342.296,
+    "dhf_kj_mol": -2218.3,
+    "hoc_kj_g": 16.49
+  },
+  {
+    "label": "gelatin_dry",
+    "formula": "C 28 H 44 O 10 N 9",
+    "mw_g_mol": 666.7,
+    "dhf_kj_mol": -6173.0,
+    "hoc_kj_g": 16.7
+  }
+]

@@ -1,0 +1,76 @@
+[
+  {
+    "label": "paraffin",
+    "formula": "C 25 H 52",
+    "dhf_kj_mol": -767.93,
+    "hoc_kj_g": 46.77
+  },
+  {
+    "label": "starch",
+    "formula": "C 6 H 10 O 5",
+    "dhf_kj_mol": -960.0,
+    "hoc_kj_g": 17.0
+  },
+  {
+    "label": "ethylene_glycol",
+    "formula": "C 2 H 6 O 2",
+    "dhf_kj_mol": -460.0,
+    "hoc_kj_g": 18.89
+  },
+  {
+    "label": "isopropanol",
+    "formula": "C 3 H 8 O 1",
+    "dhf_kj_mol": -317.0,
+    "hoc_kj_g": 33.6
+  },
+  {
+    "label": "methanol",
+    "formula": "C 1 H 4 O 1",
+    "dhf_kj_mol": -238.4,
+    "hoc_kj_g": 22.7
+  },
+  {
+    "label": "ethanol",
+    "formula": "C 2 H 6 O 1",
+    "dhf_kj_mol": -277.6,
+    "hoc_kj_g": 29.7
+  },
+  {
+    "label": "acetone",
+    "formula": "C 3 H 6 O 1",
+    "dhf_kj_mol": -248.0,
+    "hoc_kj_g": 30.8
+  },
+  {
+    "label": "acetic_acid",
+    "formula": "C 2 H 4 O 2",
+    "dhf_kj_mol": -483.5,
+    "hoc_kj_g": 14.6
+  },
+  {
+    "label": "jp10",
+    "cea_name": "JP-10(L)",
+    "formula": "C 10 H 16",
+    "hoc_kj_g": 43.3
+  },
+{
+  "label": "Jet-A",
+  "cea_name": "Jet-A(L)",
+  "formula": "C 12 H 23",
+  "hoc_kj_g": 44.0          
+}, 
+{
+  "label": "glucose",
+  "formula": "C 6 H 12 O 6",
+  "mw_g_mol": 180.156,
+  "dhf_kj_mol": -1271.0,
+  "hoc_kj_g": 15.57
+},
+{
+  "label": "sucrose",
+  "formula": "C 12 H 22 O 11",
+  "mw_g_mol": 342.296,
+  "dhf_kj_mol": -2218.3,
+  "hoc_kj_g": 16.49
+}
+]
