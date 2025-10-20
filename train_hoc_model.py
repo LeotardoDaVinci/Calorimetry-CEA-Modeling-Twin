@@ -72,13 +72,13 @@ CONFIG = {
     # ---- Downsampling (random per fuel) ----
     # If None or <=0, use all rows. Otherwise, cap to this many rows per fuel (random).
     "TRAIN_DOWNSAMPLE_PER_FUEL": None,  # e.g. 500
-    "VAL_DOWNSAMPLE_PER_FUEL": None,     # e.g. 200 rows per validation fuel
+    "VAL_DOWNSAMPLE_PER_FUEL": 200,     # e.g. 200 rows per validation fuel
 
     # ---- Dataset filters / bounds (apply BEFORE splitting) ----
     # Map: column_name -> [min, max]; use None for open bounds
     # Example: only keep rows where 1.0 <= total_Q_kJ <= 5.0
     "FILTERS": {
-        "total_Q_kJ": [10, 40],
+        # "total_Q_kJ": [5, 34],
         # "P0_MPa": [0.5, 4.0],
         # "mw_g_mol": [10.0, 500.0],
     },
@@ -97,6 +97,14 @@ CONFIG = {
     "FEAT_vspec": False,         # requires bomb volume & T0 to compute n_O2 & v_spec
     "FEAT_q_per_total_mass": True,  # Q / (m_fuel + m_O2)
 
+    # ---- Log-space transforms (optional) ----
+    "LOG_SPACE": {
+        "ENABLED": False,              # master switch
+        "FEATURES": ["P0_MPa", "mass_fuel_g", "total_Q_kJ"],  # cols to log if present
+        "TARGET": False,               # log-transform the training target (y)
+        "EPS": 1e-6,                   # small offset to keep logs finite
+    },
+
     # ---- Bomb constants for helpers (must match how you ran CEA) ----
     "BOMB_VOLUME_mL": 240.0,    # free volume in mL
     "T0_K": 303.5,              # initial temperature, K
@@ -105,15 +113,27 @@ CONFIG = {
     "VAL_SPLIT_FRACTION": 0.2,  # random holdout fraction (stratified by fuel)
     "RANDOM_SEED": 42,
 
+    # ---- Model selector & CrossMLP hyperparams ----
+    "MODEL": "cross_mlp",        # "mlp" (default behavior) or "cross_mlp"
+    "CROSS_DEPTH": 3,            # number of cross layers (2–4 is typical)
+    "DEEP_HIDDEN": 256,          # width of the deep MLP tower inside CrossMLP
+
     # ---- Model hyperparams ----
     "HIDDEN_SIZES": [64, 64],   # small MLP
     "DROPOUT_P": 0,
     "ACTIVATION": "silu",       # "relu" | "silu" | "tanh"
-    "LEARNING_RATE": 3e-3,
+    "LEARNING_RATE":3e-3,
     "BATCH_SIZE": 256,
-    "EPOCHS": 500,
+    "EPOCHS": 600,
     "WEIGHT_DECAY": 1e-6,
     "EARLY_STOP_PATIENCE": 30,  # epochs with no val improvement before early stop
+
+    "EDGE_WEIGHTING": {
+    "ENABLED": False,
+    "Z_THRESH": 1.0,     # how “far” from mean (in stds) counts as edge
+    "WEIGHT_EDGE": 2.0,  # multiply loss for edge points
+    "COLUMNS": ["HOC_kJ_g"],  # which columns to consider for edge detection
+    },
 
     # ---- Numeric stability ----
     "EPS": 1e-8,
@@ -267,49 +287,80 @@ def compute_helpers(df: pd.DataFrame, cfg: Dict) -> pd.DataFrame:
 def build_feature_matrix(df: pd.DataFrame, cfg: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """
     Returns:
-      X : (N, D) features
-      y : (N,) target in chosen space (ratio or raw)
-      y_raw : (N,) P_peak (MPa) raw values
+      X : (N, D) features (log-transformed per CONFIG['LOG_SPACE']['FEATURES'] if enabled)
+      y : (N,) target in chosen space (ratio or raw), possibly log-transformed if CONFIG['LOG_SPACE']['TARGET']
+      y_raw : (N,) P_peak (MPa) raw values (ALWAYS natural units, never log)
       feat_names: list of feature names used
     """
+    log_cfg = cfg.get("LOG_SPACE", {})
+    log_on  = bool(log_cfg.get("ENABLED", False))
+    log_eps = float(log_cfg.get("EPS", 1e-6))
+    log_feats = set(log_cfg.get("FEATURES", []))
+
+    def maybe_log(name: str, arr: np.ndarray) -> np.ndarray:
+        if log_on and (name in log_feats):
+            return np.log(arr.astype(np.float32) + log_eps)
+        return arr.astype(np.float32)
+
     feat = []
     names = []
+
     if cfg["FEAT_P0"]:
         if "P0_MPa" not in df.columns:
             raise ValueError("Column 'P0_MPa' missing from dataframe.")
-        feat.append(df["P0_MPa"].values.reshape(-1, 1))
+        arr = maybe_log("P0_MPa", df["P0_MPa"].values)
+        feat.append(arr.reshape(-1, 1))
         names.append("P0_MPa")
+
     if cfg["FEAT_MASS"]:
         if "mass_fuel_g" not in df.columns:
             raise ValueError("Column 'mass_fuel_g' missing from dataframe.")
-        feat.append(df["mass_fuel_g"].values.reshape(-1, 1))
+        arr = maybe_log("mass_fuel_g", df["mass_fuel_g"].values)
+        feat.append(arr.reshape(-1, 1))
         names.append("mass_fuel_g")
+
     if cfg["FEAT_Q"]:
         if "total_Q_kJ" not in df.columns:
             raise ValueError("Column 'total_Q_kJ' missing from dataframe.")
-        feat.append(df["total_Q_kJ"].values.reshape(-1, 1))
+        arr = maybe_log("total_Q_kJ", df["total_Q_kJ"].values)
+        feat.append(arr.reshape(-1, 1))
         names.append("total_Q_kJ")
+
     if cfg.get("FEAT_MW", False):
         if "mw_g_mol" not in df.columns:
             raise ValueError("CONFIG['FEAT_MW'] is True, but column 'mw_g_mol' is missing in the dataset.")
-        feat.append(df["mw_g_mol"].values.reshape(-1, 1))
+        arr = maybe_log("mw_g_mol", df["mw_g_mol"].values)
+        feat.append(arr.reshape(-1, 1))
         names.append("mw_g_mol")
+
     if cfg["FEAT_vspec"] and ("v_spec_m3_per_kg" in df.columns):
-        feat.append(df["v_spec_m3_per_kg"].values.reshape(-1, 1))
+        arr = maybe_log("v_spec_m3_per_kg", df["v_spec_m3_per_kg"].values)
+        feat.append(arr.reshape(-1, 1))
         names.append("v_spec_m3_per_kg")
+
     if cfg["FEAT_q_per_total_mass"] and ("q_per_total_mass_kJ_per_kg" in df.columns):
-        feat.append(df["q_per_total_mass_kJ_per_kg"].values.reshape(-1, 1))
+        arr = maybe_log("q_per_total_mass_kJ_per_kg", df["q_per_total_mass_kJ_per_kg"].values)
+        feat.append(arr.reshape(-1, 1))
         names.append("q_per_total_mass_kJ_per_kg")
 
     if not feat:
         raise ValueError("No features selected! Enable at least one FEAT_* in CONFIG.")
 
     X = np.concatenate(feat, axis=1).astype(np.float32)
+
+    # Target construction
     y_raw = df["P_peak_MPa"].values.astype(np.float32)
     if cfg["TARGET_RATIO"]:
-        y = (y_raw / (df["P0_MPa"].values.astype(np.float32) + cfg["EPS"])).astype(np.float32)
+        y_nat = (y_raw / (df["P0_MPa"].values.astype(np.float32) + cfg["EPS"])).astype(np.float32)
     else:
-        y = y_raw
+        y_nat = y_raw
+
+    # Optional log on target
+    if log_on and bool(log_cfg.get("TARGET", False)):
+        y = np.log(y_nat + log_eps).astype(np.float32)
+    else:
+        y = y_nat
+
     return X, y, y_raw, names
 
 # Simple scaler (avoid sklearn)
@@ -358,6 +409,56 @@ def _act(name: str):
         return nn.Tanh()
     raise ValueError(f"Unknown activation {name}")
 
+class CrossLayer(nn.Module):
+    """
+    DCN-v2 style cross layer: x_{l+1} = x0 * (x_l @ w) + b + x_l
+    """
+    def __init__(self, d):
+        super().__init__()
+        self.w = nn.Parameter(torch.randn(d))
+        self.b = nn.Parameter(torch.zeros(d))
+
+    def forward(self, x0, x):
+        # x, x0: (B, D). (x @ w) -> (B,)
+        cross_term = (x @ self.w)[:, None]   # (B,1)
+        return x0 * cross_term + self.b + x  # broadcast over D
+
+
+class CrossMLP(nn.Module):
+    """
+    Combines a shallow 'cross' tower (explicit feature crosses) with a deep MLP tower.
+    Concatenate their outputs and predict a scalar.
+    """
+    def __init__(self, in_dim: int, cross_depth: int = 3, hidden: int = 128, act: str = "silu", dropout_p: float = 0.0):
+        super().__init__()
+        A = {"relu": nn.ReLU, "silu": nn.SiLU, "tanh": nn.Tanh}[act]
+
+        # Cross tower
+        self.cross = nn.ModuleList([CrossLayer(in_dim) for _ in range(cross_depth)])
+
+        # Deep tower (very light)
+        deep_layers: List[nn.Module] = [
+            nn.LayerNorm(in_dim), A(), nn.Linear(in_dim, hidden), A()
+        ]
+        if dropout_p > 0:
+            deep_layers.append(nn.Dropout(dropout_p))
+        deep_layers += [nn.Linear(hidden, hidden), A()]
+        self.deep = nn.Sequential(*deep_layers)
+
+        # Head on concatenated [cross_out, deep_out]
+        self.head = nn.Linear(in_dim + hidden, 1)
+
+    def forward(self, x):
+        # Cross tower
+        x0 = x
+        xc = x
+        for layer in self.cross:
+            xc = layer(x0, xc)
+        # Deep tower
+        h = self.deep(x)
+        # Predict
+        return self.head(torch.cat([xc, h], dim=-1)).squeeze(-1)
+
 class MLPRegressor(nn.Module):
     def __init__(self, in_dim: int, hidden: List[int], dropout_p: float, act: str):
         super().__init__()
@@ -384,6 +485,23 @@ class NumpyDataset(Dataset):
 
     def __getitem__(self, idx: int):
         return self.X[idx], self.y[idx]
+    
+class WeightedNumpyDataset(Dataset):
+    def __init__(self, X: np.ndarray, y: np.ndarray, w: Optional[np.ndarray] = None):
+        self.X = X
+        self.y = y
+        if w is None:
+            self.w = np.ones_like(y, dtype=np.float32)
+        else:
+            self.w = w.astype(np.float32)
+
+    def __len__(self) -> int:
+        return self.X.shape[0]
+
+    def __getitem__(self, idx: int):
+        # return weights as third item
+        return self.X[idx], self.y[idx], self.w[idx]
+
 
 def train_val_split_by_fuel(df: pd.DataFrame, val_frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -452,12 +570,62 @@ def train_model(
     y_train_s = ysc.transform(y_train.reshape(-1, 1)).ravel().astype(np.float32)
     y_val_s   = ysc.transform(y_val.reshape(-1, 1)).ravel().astype(np.float32)
 
-    # ---------------------- DataLoaders -----------------------
-    train_ds = NumpyDataset(X_train_s, y_train_s)
-    val_ds   = NumpyDataset(X_val_s,   y_val_s)
+    # ------------------------------------------------------------
+    # Edge weighting setup (optional)
+    # ------------------------------------------------------------
+    ew_cfg = cfg.get("EDGE_WEIGHTING", {})
+    sample_w_train = None
+    sample_w_val = None
 
+    if ew_cfg.get("ENABLED", False):
+        # Only use columns that exist in df_rows_for_metrics
+        cols = [c for c in ew_cfg.get("COLUMNS", []) if c in df_rows_for_metrics.columns]
+        if cols:
+            # Training subset
+            df_tr = df_rows_for_metrics.iloc[train_mask]
+
+            # Compute mean and std for z-score normalization (avoid div by zero)
+            mu = df_tr[cols].mean()
+            sd = df_tr[cols].std().replace(0, 1.0)
+
+            # Define function to compute weights for any dataframe split
+            def weights(dfpart):
+                # z-scores across specified columns
+                z = ((dfpart[cols] - mu) / sd).abs()
+                # "edge" = any column beyond threshold
+                is_edge = (z > float(ew_cfg.get("Z_THRESH", 1.0))).any(axis=1)
+                # Initialize weights = 1
+                w = np.ones(len(dfpart), dtype=np.float32)
+                # Heavier weight for edge samples
+                w[is_edge.values] = float(ew_cfg.get("WEIGHT_EDGE", 2.0))
+                return w
+
+            # Compute weights for training and validation splits
+            sample_w_train = weights(df_tr)
+            sample_w_val = weights(df_rows_for_metrics.iloc[val_mask])
+
+            # ------------------------------------------------------------
+            # Diagnostic print: summarize how many samples are edge-weighted
+            # ------------------------------------------------------------
+            if sample_w_train is not None:
+                frac_edge = (sample_w_train > 1.0).mean()
+                mean_w = sample_w_train.mean()
+                print(f"[EDGE] mean train weight = {mean_w:.3f} | fraction edge = {frac_edge:.3f}")
+
+    
+
+    # ---------------------- DataLoaders -----------------------
     pin = bool(cfg.get("PIN_MEMORY", True) and device.type == "cuda")
     nw  = int(cfg.get("NUM_WORKERS", 0))
+
+    use_weights = (sample_w_train is not None)
+
+    if use_weights:
+        train_ds = WeightedNumpyDataset(X_train_s, y_train_s, sample_w_train)
+        val_ds   = WeightedNumpyDataset(X_val_s,   y_val_s,   sample_w_val)
+    else:
+        train_ds = NumpyDataset(X_train_s, y_train_s)
+        val_ds   = NumpyDataset(X_val_s,   y_val_s)
 
     train_loader = DataLoader(
         train_ds, batch_size=cfg["BATCH_SIZE"], shuffle=True,
@@ -468,20 +636,31 @@ def train_model(
         drop_last=False, pin_memory=pin, num_workers=nw
     )
 
+
     # ----------------------- Model/Opt ------------------------
-    model = MLPRegressor(
-        in_dim=X.shape[1],
-        hidden=cfg["HIDDEN_SIZES"],
-        dropout_p=cfg["DROPOUT_P"],
-        act=cfg["ACTIVATION"],
-    ).to(device)
+    if cfg.get("MODEL", "mlp").lower() == "cross_mlp":
+        model = CrossMLP(
+            in_dim=X.shape[1],
+            cross_depth=int(cfg.get("CROSS_DEPTH", 3)),
+            hidden=int(cfg.get("DEEP_HIDDEN", 128)),
+            act=cfg.get("ACTIVATION", "silu"),
+            dropout_p=float(cfg.get("DROPOUT_P", 0.0)),
+        ).to(device)
+    else:
+        model = MLPRegressor(
+            in_dim=X.shape[1],
+            hidden=cfg["HIDDEN_SIZES"],
+            dropout_p=cfg["DROPOUT_P"],
+            act=cfg["ACTIVATION"],
+        ).to(device)
 
     opt = torch.optim.AdamW(
         model.parameters(),
         lr=cfg["LEARNING_RATE"],
         weight_decay=cfg["WEIGHT_DECAY"],
     )
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.SmoothL1Loss(beta=1.0, reduction="none")  # Huber loss per sample
+    # loss_fn = nn.MSELoss(reduction="none")  # per-sample loss; we’ll reduce manually
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     best_val = float("inf")
@@ -494,16 +673,39 @@ def train_model(
 
     # ===================== Train Loop =====================
     for epoch in range(1, cfg["EPOCHS"] + 1):
-        # ----- Train -----
+
+        # -------- TRAIN PHASE --------
         model.train()
-        tr_loss_sum, tr_count = 0.0, 0
-        for xb, yb in train_loader:
+        # We'll accumulate a *true* epoch loss:
+        #   - If weighted: sum_i (w_i * mse_i) / sum_i (w_i)S
+        #   - If unweighted: sum_i (mse_i) / N
+        tr_num, tr_den = 0.0, 0.0
+
+        for batch in train_loader:
+            # Unpack batch; weighted loader yields (X, y, w), unweighted yields (X, y)
+            if use_weights and len(batch) == 3:
+                xb, yb, wb = batch
+                wb = wb.to(device, non_blocking=True)
+            else:
+                xb, yb = batch
+                wb = None
+
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
+
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-                pred = model(xb)
-                loss = loss_fn(pred, yb)
+                pred = model(xb)                      # shape [B]
+                per_sample = loss_fn(pred, yb)        # shape [B], MSE per item
+
+                # Loss used for backprop (normalized so LR is stable)
+                if wb is not None:
+                    batch_den = wb.sum() + 1e-8
+                    loss = (per_sample * wb).sum() / batch_den
+                else:
+                    loss = per_sample.mean()
+
+            # Backward + step (AMP aware)
             if use_amp:
                 scaler.scale(loss).backward()
                 scaler.step(opt)
@@ -511,29 +713,57 @@ def train_model(
             else:
                 loss.backward()
                 opt.step()
-            bs = xb.shape[0]
-            tr_loss_sum += float(loss.item()) * bs
-            tr_count += bs
-        tr_loss = tr_loss_sum / max(1, tr_count)
 
-        # ----- Validate -----
+            # ---- Epoch loss accounting (for reporting only) ----
+            if wb is not None:
+                # Weighted numerator/denominator for epoch average
+                tr_num += float((per_sample.detach() * wb.detach()).sum().item())
+                tr_den += float(batch_den.item())
+            else:
+                tr_num += float(per_sample.detach().sum().item())
+                tr_den += float(xb.shape[0])
+
+        tr_loss = tr_num / max(tr_den, 1e-12)
+
+        # -------- VALIDATION PHASE --------
         model.eval()
-        va_loss_sum, va_count = 0.0, 0
+        va_num, va_den = 0.0, 0.0
         with torch.no_grad():
-            for xb, yb in val_loader:
+            for batch in val_loader:
+                # Unpack batch; val loader mirrors train loader
+                if use_weights and len(batch) == 3:
+                    xb, yb, wb = batch
+                    wb = wb.to(device, non_blocking=True)
+                else:
+                    xb, yb = batch
+                    wb = None
+
                 xb = xb.to(device, non_blocking=True)
                 yb = yb.to(device, non_blocking=True)
+
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
                     pred = model(xb)
-                    loss = loss_fn(pred, yb)
-                bs = xb.shape[0]
-                va_loss_sum += float(loss.item()) * bs
-                va_count += bs
-        va_loss = va_loss_sum / max(1, va_count)
+                    per_sample = loss_fn(pred, yb)  # shape [B]
 
-        print(f"Epoch {epoch:4d} | train MSE: {tr_loss:.6f} | val MSE: {va_loss:.6f}")
+                    if wb is not None:
+                        batch_den = wb.sum() + 1e-8
+                        loss = (per_sample * wb).sum() / batch_den
+                    else:
+                        loss = per_sample.mean()
 
-        # Early stopping
+                # ---- Epoch val loss accounting ----
+                if wb is not None:
+                    va_num += float((per_sample * wb).sum().item())
+                    va_den += float(batch_den.item())
+                else:
+                    va_num += float(per_sample.sum().item())
+                    va_den += float(xb.shape[0])
+
+        va_loss = va_num / max(va_den, 1e-12)
+
+        # -------- LOGGING & EARLY STOP --------
+        print(f"Epoch {epoch:4d} | train loss: {tr_loss:.6f} | val loss: {va_loss:.6f}")
+
         if va_loss + 1e-12 < best_val:
             best_val = va_loss
             best_state = {
@@ -563,6 +793,16 @@ def train_model(
     # Use the *fitted* ysc from above—do not re-create it.
     yt_pred = ysc.inverse_transform(yt_pred_s.reshape(-1, 1)).ravel()
     yv_pred = ysc.inverse_transform(yv_pred_s.reshape(-1, 1)).ravel()
+
+    # If target was trained in log-space, un-log here
+    log_cfg = cfg.get("LOG_SPACE", {})
+    if bool(log_cfg.get("ENABLED", False)) and bool(log_cfg.get("TARGET", False)):
+        log_eps = float(log_cfg.get("EPS", 1e-6))
+        yt_pred = np.exp(yt_pred) - log_eps
+        yv_pred = np.exp(yv_pred) - log_eps
+        # numerical safety
+        yt_pred = np.maximum(yt_pred, 0.0)
+        yv_pred = np.maximum(yv_pred, 0.0)
 
     # -------------------- Human metrics (MPa) ------------------
     if df_rows_for_metrics is None:
@@ -608,6 +848,7 @@ def train_model(
         "metrics": metrics,
         "device": device.type,
         "best_state": best_state,
+        "log_space": cfg.get("LOG_SPACE", {}).copy(),
     }
     return bundle
 
@@ -631,6 +872,13 @@ def predict_p_peak_MPa(model_bundle: Dict, X_raw: np.ndarray, df_rows: pd.DataFr
         yhat_s = model(xt).cpu().numpy().ravel()
 
     yhat = ysc.inverse_transform(yhat_s.reshape(-1, 1)).ravel()
+
+    # If target was trained in log-space, un-log it
+    log_cfg = model_bundle.get("log_space", {})
+    if bool(log_cfg.get("ENABLED", False)) and bool(log_cfg.get("TARGET", False)):
+        log_eps = float(log_cfg.get("EPS", 1e-6))
+        yhat = np.exp(yhat) - log_eps
+        yhat = np.maximum(yhat, 0.0)
 
     if CONFIG["TARGET_RATIO"]:
         P0 = df_rows["P0_MPa"].values.astype(np.float32)
@@ -767,10 +1015,10 @@ if __name__ == "__main__":
 
     df = apply_filters(df, cfg.get("FILTERS", {}))
 
-    # Convert P_peak_MPa to overpressure (ΔP = P_peak - P0)
-    if "P_peak_MPa" in df.columns and "P0_MPa" in df.columns:
-        df["P_peak_MPa"] = df["P_peak_MPa"] - df["P0_MPa"]
-        print("[INFO] Converted P_peak_MPa to overpressure (ΔP = P_peak - P0).")
+    # # Convert P_peak_MPa to overpressure (ΔP = P_peak - P0)
+    # if "P_peak_MPa" in df.columns and "P0_MPa" in df.columns:
+    #     df["P_peak_MPa"] = df["P_peak_MPa"] - df["P0_MPa"]
+    #     print("[INFO] Converted P_peak_MPa to overpressure (ΔP = P_peak - P0).")
 
     print(f"[INFO] Loaded/filtered: {len(df)} rows, {df['fuel'].nunique()} fuels.")
 
